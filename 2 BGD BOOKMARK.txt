@@ -1,0 +1,319 @@
+javascript:(function(){const script=document.createElement('script');script.innerHTML=`(function() {
+    'use strict';
+
+    // Function to darken a color
+    function darkenColor(color, percent) {
+        const hex = color.replace('#', '');
+        const num = parseInt(hex, 16);
+        const amt = Math.round(2.55 * percent);
+        const R = Math.max((num >> 16) - amt, 0);
+        const G = Math.max((num >> 8 & 0x00FF) - amt, 0);
+        const B = Math.max((num & 0x0000FF) - amt, 0);
+        return \`#\${(1 << 24 | R << 16 | G << 8 | B).toString(16).slice(1)}\`;
+    }
+
+    // Function to create beautiful buttons
+    function createFetchButton(fetchFunction, buttonText, color) {
+        const button = document.createElement('button');
+        button.textContent = buttonText;
+
+        // Base button styling
+        button.style.cssText = \`
+            padding: 12px 24px;
+            background: \${color};
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            margin: 5px;
+            width: 200px;
+            height: 50px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            overflow: hidden;
+        \`;
+
+        // Add hover effect
+        button.addEventListener('mouseover', () => {
+            button.style.background = darkenColor(color, 15);
+            button.style.transform = 'translateY(-2px)';
+            button.style.boxShadow = '0 6px 12px rgba(0, 0, 0, 0.15)';
+        });
+
+        button.addEventListener('mouseout', () => {
+            button.style.background = color;
+            button.style.transform = 'translateY(0)';
+            button.style.boxShadow = '0 4px 6px rgba(0, 0, 0, 0.1)';
+        });
+
+        // Add click effect
+        button.addEventListener('mousedown', () => {
+            button.style.transform = 'translateY(1px)';
+            button.style.boxShadow = '0 2px 4px rgba(0, 0, 0, 0.1)';
+        });
+
+        // Add ripple effect
+        button.addEventListener('click', function(e) {
+            const ripple = document.createElement('span');
+            ripple.style.cssText = \`
+                position: absolute;
+                background: rgba(255, 255, 255, 0.4);
+                border-radius: 50%;
+                transform: scale(0);
+                animation: ripple 600ms linear;
+                pointer-events: none;
+            \`;
+
+            const rect = this.getBoundingClientRect();
+            const size = Math.max(rect.width, rect.height);
+            const x = e.clientX - rect.left - size/2;
+            const y = e.clientY - rect.top - size/2;
+
+            ripple.style.width = ripple.style.height = \`\${size}px\`;
+            ripple.style.left = \`\${x}px\`;
+            ripple.style.top = \`\${y}px\`;
+
+            this.appendChild(ripple);
+
+            setTimeout(() => {
+                ripple.remove();
+            }, 600);
+
+            fetchFunction();
+        });
+
+        buttonContainer.appendChild(button);
+    }
+
+    // Create stylish container
+    const buttonContainer = document.createElement('div');
+    buttonContainer.style.cssText = \`
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 9999;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        max-width: 90%;
+        gap: 10px;
+        padding: 15px;
+        background: rgba(255, 255, 255, 0.95);
+        border-radius: 12px;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+        backdrop-filter: blur(5px);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        animation: fadeInUp 0.5s ease-out;
+        cursor: move;
+    \`;
+
+    // Add close button (X mark)
+    const closeButton = document.createElement('div');
+    closeButton.innerHTML = '&times;';
+    closeButton.style.cssText = \`
+        position: absolute;
+        top: 5px;
+        right: 10px;
+        font-size: 20px;
+        font-weight: bold;
+        color: #555;
+        cursor: pointer;
+        transition: all 0.2s;
+        user-select: none;
+    \`;
+    closeButton.addEventListener('mouseover', () => {
+        closeButton.style.color = '#f44336';
+        closeButton.style.transform = 'scale(1.2)';
+    });
+    closeButton.addEventListener('mouseout', () => {
+        closeButton.style.color = '#555';
+        closeButton.style.transform = 'scale(1)';
+    });
+    closeButton.addEventListener('click', () => {
+        buttonContainer.remove();
+    });
+
+    // Make the panel draggable
+    let isDragging = false;
+    let offsetX, offsetY;
+
+    // Add drag handle (the panel title)
+    const panelTitle = document.createElement('div');
+    panelTitle.textContent = '2 BGD';
+    panelTitle.style.cssText = \`
+        width: 100%;
+        text-align: center;
+        font-weight: bold;
+        font-size: 16px;
+        margin-bottom: 10px;
+        color: #333;
+        text-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        cursor: move;
+        user-select: none;
+    \`;
+
+    // Drag start handler
+    panelTitle.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        const rect = buttonContainer.getBoundingClientRect();
+        offsetX = e.clientX - rect.left;
+        offsetY = e.clientY - rect.top;
+
+        buttonContainer.style.transition = 'none';
+        document.body.style.userSelect = 'none';
+    });
+
+    // Drag handler
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+
+        buttonContainer.style.left = \`\${e.clientX - offsetX}px\`;
+        buttonContainer.style.top = \`\${e.clientY - offsetY}px\`;
+        buttonContainer.style.transform = 'none';
+    });
+
+    // Drag end handler
+    document.addEventListener('mouseup', () => {
+        if (isDragging) {
+            isDragging = false;
+            buttonContainer.style.transition = 'all 0.3s ease';
+            document.body.style.userSelect = '';
+        }
+    });
+
+    buttonContainer.appendChild(panelTitle);
+    buttonContainer.appendChild(closeButton);
+
+    // Add ripple animation
+    const style = document.createElement('style');
+    style.textContent = \`
+        @keyframes ripple {
+            to { transform: scale(4); opacity: 0; }
+        }
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translate(-50%, 20px); }
+            to { opacity: 1; transform: translate(-50%, 0); }
+        }
+    \`;
+    document.head.appendChild(style);
+
+    document.body.appendChild(buttonContainer);
+
+    // Color scheme for buttons
+    const buttonColors = {
+        application: '#ef4444', // Red
+        personal: '#f59e0b',  // Amber
+        overview: '#8b5cf6'   // Violet
+    };
+
+    // Fetch functions with beautiful buttons
+    const fetchFunctions = [
+        {
+            text: 'Application',
+            func: () => {
+                const csrfToken = window.csrf_token;
+                fetch("https://payment.ivacbd.com/application-info-submit", {
+                    "headers": {
+                        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                        "accept-language": "en-US,en;q=0.9",
+                        "cache-control": "max-age=0",
+                        "content-type": "application/x-www-form-urlencoded",
+                        "priority": "u=0, i",
+                        "sec-ch-ua": "\\"Not(A:Brand\\";v=\\"99\\", \\"Google Chrome\\";v=\\"133\\", \\"Chromium\\";v=\\"133\\"",
+                        "sec-ch-ua-mobile": "?0",
+                        "sec-ch-ua-platform": "\\"Windows\\"",
+                        "sec-fetch-dest": "document",
+                        "sec-fetch-mode": "navigate",
+                        "sec-fetch-site": "same-origin",
+                        "sec-fetch-user": "?1",
+                        "upgrade-insecure-requests": "1"
+                    },
+                    "referrer": "https://payment.ivacbd.com/",
+                    "referrerPolicy": "strict-origin-when-cross-origin",
+                    "body": \`_token=\${csrfToken}&highcom=3&webfile_id=BGDRV09FD425&webfile_id_repeat=BGDRV09FD425&ivac_id=2&visa_type=2&family_count=1&visit_purpose=MEDICAL+AND+MEDICAL+ATTENDANCE\`,
+                    "method": "POST",
+                    "mode": "cors",
+                    "credentials": "include"
+                }).then(response => response.json())
+                  .then(data => console.log(data))
+                  .catch(error => console.error('Error:', error));
+            },
+            color: buttonColors.application
+        },
+        {
+            text: 'Personal',
+            func: () => {
+                const csrfToken = window.csrf_token;
+                fetch("https://payment.ivacbd.com/personal-info-submit", {
+                    "headers": {
+                        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                        "accept-language": "en-US,en;q=0.9",
+                        "cache-control": "no-cache",
+                        "content-type": "application/x-www-form-urlencoded",
+                        "pragma": "no-cache",
+                        "priority": "u=0, i",
+                        "sec-ch-ua": "\\"Not(A:Brand\\";v=\\"99\\", \\"Google Chrome\\";v=\\"133\\", \\"Chromium\\";v=\\"133\\"",
+                        "sec-ch-ua-mobile": "?0",
+                        "sec-ch-ua-platform": "\\"Windows\\"",
+                        "sec-fetch-dest": "document",
+                        "sec-fetch-mode": "navigate",
+                        "sec-fetch-site": "same-origin",
+                        "sec-fetch-user": "?1",
+                        "upgrade-insecure-requests": "1"
+                    },
+                    "referrer": "https://payment.ivacbd.com/personal-info",
+                    "referrerPolicy": "strict-origin-when-cross-origin",
+                    "body": \`_token=\${csrfToken}&full_name=MD+POLAS&email_name=DESIGNER.NIRVIK%40GMAIL.COM&pho_ne=01300083631&web_file_id=BGDRV09FD425&family%5B1%5D%5Bname%5D=SHARMISTA+MONDOL&family%5B1%5D%5Bwebfile_no%5D=BGDRV2575E25&family%5B1%5D%5Bagain_webfile_no%5D=BGDRV2575E25\`,
+                    "method": "POST",
+                    "mode": "cors",
+                    "credentials": "include"
+                }).then(response => response.json())
+                  .then(data => console.log(data))
+                  .catch(error => console.error('Error:', error));
+            },
+            color: buttonColors.personal
+        },
+        {
+            text: 'Overview',
+            func: () => {
+                const csrfToken = window.csrf_token;
+                fetch("https://payment.ivacbd.com/overview-submit", {
+                    "headers": {
+                        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                        "accept-language": "en-US,en;q=0.9",
+                        "cache-control": "max-age=0",
+                        "content-type": "application/x-www-form-urlencoded",
+                        "priority": "u=0, i",
+                        "sec-ch-ua": "\\"Not(A:Brand\\";v=\\"99\\", \\"Google Chrome\\";v=\\"133\\", \\"Chromium\\";v=\\"133\\"",
+                        "sec-ch-ua-mobile": "?0",
+                        "sec-ch-ua-platform": "\\"Windows\\"",
+                        "sec-fetch-dest": "document",
+                        "sec-fetch-mode": "navigate",
+                        "sec-fetch-site": "same-origin",
+                        "sec-fetch-user": "?1",
+                        "upgrade-insecure-requests": "1"
+                    },
+                    "referrer": "https://payment.ivacbd.com/overview",
+                    "referrerPolicy": "strict-origin-when-cross-origin",
+                    "body": \`_token=\${csrfToken}\`,
+                    "method": "POST",
+                    "mode": "cors",
+                    "credentials": "include"
+                }).then(response => response.json())
+                  .then(data => console.log(data))
+                  .catch(error => console.error('Error:', error));
+            },
+            color: buttonColors.overview
+        }
+    ];
+
+    // Create beautiful buttons
+    fetchFunctions.forEach(({ text, func, color }) => createFetchButton(func, text, color));
+})();`;document.body.appendChild(script);})();
