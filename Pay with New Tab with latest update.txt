@@ -1,0 +1,679 @@
+// ==UserScript==
+// @name         Payment new tab token fix
+// @namespace    http://tampermonkey.net/
+// @version      7.5
+// @description  Sabbir Rahman (01617845611)
+// @match        https://payment.ivacbd.com/
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+    "use strict";
+
+    // API Endpoints
+    const API_URLS = {
+        slotTime: "https://payment.ivacbd.com/pay-slot-time",
+        payNow: "https://payment.ivacbd.com/paynow"
+    };
+
+    // Global State
+    let globalStop = false;
+    let csrfToken = null;
+    let statusMessageEl = null;
+    let activeRequests = [];
+    let selectedDate = null;
+    let selectedTime = null;
+    let recaptchaWidgetId = null;
+    let recaptchaToken = null;
+    let isDragging = false;
+    let dragOffset = { x: 0, y: 0 };
+    let recaptchaLoadAttempted = false;
+
+    // Default payment method (VISA)
+    const DEFAULT_PAYMENT_METHOD = {
+        name: "VISA",
+        slug: "visacard",
+        link: "https://securepay.sslcommerz.com/gwprocess/v4/image/gw1/visa.png"
+    };
+
+    // Helper Functions
+    function logInfo(msg) {
+        console.log(`[INFO] ${msg}`);
+        if (statusMessageEl) {
+            statusMessageEl.textContent = msg;
+            statusMessageEl.style.color = "#5a5a5a";
+        }
+    }
+
+    function logError(msg) {
+        console.error(`[ERROR] ${msg}`);
+        if (statusMessageEl) {
+            statusMessageEl.textContent = msg;
+            statusMessageEl.style.color = "#ff4444";
+        }
+    }
+
+    function logSuccess(msg) {
+        console.log(`[SUCCESS] ${msg}`);
+        if (statusMessageEl) {
+            statusMessageEl.textContent = msg;
+            statusMessageEl.style.color = "#00C851";
+        }
+    }
+
+    function retrieveCsrfToken() {
+        // First try to get from window.csrf_token as requested
+        if (window.csrf_token) {
+            return window.csrf_token;
+        }
+
+        // Fallback methods if window.csrf_token not available
+        const meta = document.querySelector("meta[name='csrf-token']");
+        if (meta) return meta.content;
+
+        const input = document.querySelector("input[name='_token']");
+        if (input) return input.value;
+
+        const cookieMatch = document.cookie.match(/XSRF-TOKEN=([^;]+)/);
+        if (cookieMatch) return decodeURIComponent(cookieMatch[1]);
+
+        const scripts = document.getElementsByTagName('script');
+        for (let script of scripts) {
+            const match = script.textContent.match(/window\.csrfToken\s*=\s*['"]([^'"]+)['"]/);
+            if (match) return match[1];
+        }
+
+        const forms = document.getElementsByTagName('form');
+        for (let form of forms) {
+            const formInput = form.querySelector("input[name='_token']");
+            if (formInput) return formInput.value;
+        }
+
+        return null;
+    }
+
+    async function fetchCsrfToken() {
+        csrfToken = retrieveCsrfToken();
+        if (csrfToken) return csrfToken;
+
+        // If window.csrf_token not found, try these fallback endpoints
+        const endpoints = [
+            '/csrf-token',
+            '/api/csrf-token',
+            '/sanctum/csrf-cookie'
+        ];
+
+        for (const endpoint of endpoints) {
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'GET',
+                    credentials: 'include'
+                });
+
+                if (response.ok) {
+                    csrfToken = retrieveCsrfToken();
+                    if (csrfToken) return csrfToken;
+                }
+            } catch (e) {
+                console.log(`Failed to fetch CSRF from ${endpoint}`, e);
+            }
+        }
+
+        return null;
+    }
+
+    async function sendPostRequest(url, data) {
+        if (!csrfToken) {
+            csrfToken = retrieveCsrfToken(); // Try to get from window.csrf_token first
+            if (!csrfToken) {
+                csrfToken = await fetchCsrfToken(); // Fallback to other methods
+                if (!csrfToken) {
+                    logError("CSRF token not found");
+                    return null;
+                }
+            }
+        }
+
+        const requestData = {
+            ...data,
+            _token: csrfToken
+        };
+
+        let retryCount = 0;
+
+        while (true) {
+            if (globalStop) {
+                logInfo("Operation stopped by user");
+                return null;
+            }
+
+            const controller = new AbortController();
+            activeRequests.push(controller);
+
+            try {
+                const response = await fetch(url, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "X-CSRF-TOKEN": csrfToken
+                    },
+                    body: new URLSearchParams(requestData),
+                    signal: controller.signal,
+                    credentials: 'include'
+                });
+
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const result = await response.json();
+
+                if (result.message && result.message.toLowerCase().includes('csrf token')) {
+                    csrfToken = retrieveCsrfToken();
+                    if (!csrfToken) {
+                        csrfToken = await fetchCsrfToken();
+                        if (!csrfToken) {
+                            throw new Error("CSRF token refresh failed");
+                        }
+                    }
+                    continue;
+                }
+
+                return result;
+
+            } catch (err) {
+                if (err.name !== "AbortError") {
+                    retryCount++;
+                    if (retryCount <= 3) {
+                        await new Promise(resolve => setTimeout(resolve, 1000 * Math.min(retryCount, 5)));
+                        continue;
+                    }
+                    logError(`Request failed after ${retryCount} attempts: ${err.message}`);
+                    return null;
+                }
+                return null;
+            } finally {
+                activeRequests = activeRequests.filter(req => req !== controller);
+            }
+        }
+    }
+
+    function makeDraggable(panel, header) {
+        header.style.cursor = 'move';
+
+        header.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+
+            isDragging = true;
+            dragOffset = {
+                x: e.clientX - panel.getBoundingClientRect().left,
+                y: e.clientY - panel.getBoundingClientRect().top
+            };
+
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+
+            panel.style.left = `${e.clientX - dragOffset.x}px`;
+            panel.style.top = `${e.clientY - dragOffset.y}px`;
+        });
+
+        document.addEventListener('mouseup', () => {
+            isDragging = false;
+        });
+    }
+
+    async function getSlotTimes() {
+        if (!selectedDate) {
+            logError("Please select a date first");
+            return;
+        }
+
+        logInfo(`Fetching slots for ${selectedDate}...`);
+        const result = await sendPostRequest(API_URLS.slotTime, { appointment_date: selectedDate });
+        if (result?.success) {
+            logSuccess("✓ Slots loaded");
+            updateTimeDropdown(result.data?.slot_times || []);
+            if (!recaptchaLoadAttempted) {
+                loadRecaptcha();
+            }
+        } else if (result) {
+            logError("Failed to load slots");
+        }
+    }
+
+    function loadRecaptcha() {
+        if (recaptchaLoadAttempted) return;
+        recaptchaLoadAttempted = true;
+
+        const script = document.createElement('script');
+        script.src = 'https://www.google.com/recaptcha/api.js?onload=onRecaptchaLoad&render=explicit';
+        script.async = true;
+        script.defer = true;
+
+        window.onRecaptchaLoad = function() {
+            renderRecaptcha();
+        };
+
+        script.onerror = function() {
+            logError('Failed to load reCAPTCHA');
+            document.getElementById("ivac-recaptcha-container").innerHTML = 'Verification failed to load';
+        };
+        document.head.appendChild(script);
+    }
+
+    function renderRecaptcha() {
+        const recaptchaContainer = document.getElementById("ivac-recaptcha-container");
+
+        if (window.grecaptcha && window.grecaptcha.render) {
+            grecaptcha.ready(function() {
+                try {
+                    recaptchaContainer.innerHTML = '<div class="g-recaptcha"></div>';
+
+                    // Force verify button by using a custom implementation
+                    recaptchaWidgetId = grecaptcha.render(recaptchaContainer.querySelector('.g-recaptcha'), {
+                        sitekey: '6LdOCpAqAAAAAOLNB3Vwt_H7Nw4GGCAbdYm5Brsb',
+                        callback: function(token) {
+                            recaptchaToken = token;
+                            logSuccess('✓ Verification complete - Ready to pay');
+                        },
+                        'expired-callback': function() {
+                            recaptchaToken = null;
+                            logError('Verification expired - Please verify again');
+                        },
+                        'error-callback': function() {
+                            recaptchaToken = null;
+                            logError('Verification error - Please try again');
+                        },
+                        size: 'normal',
+                        theme: 'light'
+                    });
+
+                    // Modify the recaptcha iframe to force verify button
+                    const modifyRecaptcha = () => {
+                        const iframe = document.querySelector('iframe[src*="recaptcha"]');
+                        if (iframe) {
+                            // Change the URL to force verify button
+                            if (iframe.src.includes('&ver=2')) {
+                                iframe.src = iframe.src.replace('&ver=2', '&ver=3');
+                            }
+                        }
+                    };
+
+                    // Check periodically until we find the iframe
+                    const checkInterval = setInterval(() => {
+                        modifyRecaptcha();
+                        const iframe = document.querySelector('iframe[src*="recaptcha"]');
+                        if (iframe) {
+                            clearInterval(checkInterval);
+                        }
+                    }, 200);
+
+                    logInfo('Please complete the verification');
+                } catch (e) {
+                    logError('Failed to render reCAPTCHA: ' + e.message);
+                    recaptchaContainer.innerHTML = 'Verification failed to load';
+                }
+            });
+        } else {
+            logError('reCAPTCHA API not available');
+        }
+    }
+
+    function reloadCaptcha() {
+        logInfo("Reloading reCAPTCHA...");
+        recaptchaToken = null;
+        if (window.grecaptcha && recaptchaWidgetId !== null) {
+            grecaptcha.reset(recaptchaWidgetId);
+        } else {
+            loadRecaptcha();
+        }
+    }
+
+    async function handlePayNow() {
+        if (!selectedDate || !selectedTime) {
+            logError("Please select both date and time");
+            return;
+        }
+
+        if (!recaptchaToken) {
+            logError("Please complete the verification");
+            return;
+        }
+
+        logInfo("Processing payment with Visa...");
+
+        const paymentData = {
+            appointment_date: selectedDate,
+            appointment_time: selectedTime,
+            hash_param: recaptchaToken,
+            'selected_payment[name]': DEFAULT_PAYMENT_METHOD.name,
+            'selected_payment[slug]': DEFAULT_PAYMENT_METHOD.slug,
+            'selected_payment[link]': DEFAULT_PAYMENT_METHOD.link,
+            'g-recaptcha-response': recaptchaToken,
+            _token: csrfToken
+        };
+
+        try {
+            const result = await sendPostRequest(API_URLS.payNow, paymentData);
+            if (result?.success) {
+                logSuccess("✓ Visa payment processing started");
+
+                // Check if URL exists in response and open in new tab
+                if (result.url) {
+                    logInfo("Opening payment gateway in new tab...");
+                    window.open(result.url, '_blank');
+                } else {
+                    logError("Payment URL not received");
+                }
+            } else {
+                logError(result?.message || "Payment failed");
+            }
+        } catch (error) {
+            logError("Payment processing error: " + error.message);
+        }
+    }
+
+    function updateTimeDropdown(times) {
+        const dropdown = document.getElementById("ivac-time-dropdown");
+        dropdown.innerHTML = '<option value="">Select Time</option>';
+
+        times.forEach(time => {
+            if (time.date === selectedDate) {
+                const option = document.createElement("option");
+                option.value = time.hour;
+                option.textContent = time.time_display;
+                option.dataset.available = time.availableSlot;
+                dropdown.appendChild(option);
+            }
+        });
+
+        if (dropdown.options.length === 1) {
+            logError("No available slots for selected date");
+        }
+
+        dropdown.onchange = (e) => {
+            selectedTime = e.target.value;
+            if (!recaptchaLoadAttempted) {
+                loadRecaptcha();
+            }
+        };
+    }
+
+    function createButton(text, onClick, color, hoverColor, width = 'auto') {
+        const btn = document.createElement("button");
+        btn.textContent = text;
+        btn.onclick = onClick;
+        btn.style.cssText = `
+            padding: 8px 12px;
+            margin: 0;
+            width: ${width};
+            background: ${color};
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-family: 'Inter', 'Segoe UI', Roboto, sans-serif;
+            backdrop-filter: blur(5px);
+            -webkit-backdrop-filter: blur(5px);
+            white-space: nowrap;
+        `;
+        btn.onmouseover = () => {
+            btn.style.background = hoverColor;
+            btn.style.transform = "translateY(-1px)";
+            btn.style.boxShadow = "0 4px 8px rgba(0,0,0,0.15)";
+        };
+        btn.onmouseout = () => {
+            btn.style.background = color;
+            btn.style.transform = "translateY(0)";
+            btn.style.boxShadow = "0 2px 4px rgba(0,0,0,0.1)";
+        };
+        return btn;
+    }
+
+    function createDateTimeInputs() {
+        const container = document.createElement("div");
+        container.style.cssText = `
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin: 8px 0;
+        `;
+
+        const dateContainer = document.createElement("div");
+        dateContainer.style.cssText = `
+            display: flex;
+            align-items: center;
+            flex: 1;
+        `;
+
+        const dateInput = document.createElement("input");
+        dateInput.id = "ivac-date-input";
+        dateInput.type = "text";
+        dateInput.placeholder = "YYYY/MM/DD";
+        dateInput.style.cssText = `
+            padding: 8px 12px;
+            width: 100%;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 6px;
+            font-size: 12px;
+            box-sizing: border-box;
+            background: rgba(255,255,255,0.8);
+            backdrop-filter: blur(5px);
+            -webkit-backdrop-filter: blur(5px);
+            font-family: 'Inter', 'Segoe UI', Roboto, sans-serif;
+            color: #333;
+        `;
+        dateInput.addEventListener('change', (e) => {
+            selectedDate = e.target.value;
+            document.getElementById("ivac-time-dropdown").innerHTML = '<option value="">Select Time</option>';
+            selectedTime = null;
+        });
+        dateContainer.appendChild(dateInput);
+
+        const timeContainer = document.createElement("div");
+        timeContainer.style.cssText = `
+            display: flex;
+            align-items: center;
+            flex: 1;
+        `;
+
+        const timeSelect = document.createElement("select");
+        timeSelect.id = "ivac-time-dropdown";
+        timeSelect.style.cssText = `
+            padding: 8px 12px;
+            width: 100%;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 6px;
+            font-size: 12px;
+            box-sizing: border-box;
+            background: rgba(255,255,255,0.8);
+            backdrop-filter: blur(5px);
+            -webkit-backdrop-filter: blur(5px);
+            font-family: 'Inter', 'Segoe UI', Roboto, sans-serif;
+            color: #333;
+            cursor: pointer;
+        `;
+        timeSelect.innerHTML = '<option value="">Select Time</option>';
+        timeContainer.appendChild(timeSelect);
+
+        container.appendChild(dateContainer);
+        container.appendChild(timeContainer);
+        return container;
+    }
+
+    function createStatusPanel() {
+        const panel = document.createElement("div");
+        panel.id = "ivac-status-panel";
+        panel.style.cssText = `
+            padding: 10px;
+            margin: 0 0 10px 0;
+            background: rgba(255,255,255,0.8);
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.2);
+            font-size: 12px;
+            min-height: 20px;
+            word-break: break-word;
+            text-align: center;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(5px);
+            -webkit-backdrop-filter: blur(5px);
+            font-family: 'Inter', 'Segoe UI', Roboto, sans-serif;
+            color: #333;
+        `;
+        return panel;
+    }
+
+    function createTopRightUI() {
+        const mainContainer = document.createElement("div");
+        mainContainer.id = "ivac-payment-container";
+        mainContainer.style.cssText = `
+            position: fixed;
+            right: 15px;
+            top: 15px;
+            z-index: 9999;
+            background: linear-gradient(135deg, rgba(255,255,255,0.3), rgba(255,255,255,0.1));
+            padding: 15px;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            width: 300px;
+            border: 1px solid rgba(255,255,255,0.2);
+            font-family: 'Inter', 'Segoe UI', Roboto, sans-serif;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            overflow: hidden;
+            user-select: none;
+        `;
+
+        const borderEffect = document.createElement("div");
+        borderEffect.style.cssText = `
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, #4285f4, #34a853, #fbbc05, #ea4335);
+            z-index: 9998;
+        `;
+        mainContainer.appendChild(borderEffect);
+
+        const title = document.createElement("h3");
+        title.textContent = "Sabbir Rahman";
+        title.style.cssText = `
+            margin: 0 0 12px 0;
+            padding: 0;
+            font-size: 14px;
+            color: #333;
+            font-weight: 600;
+            text-align: center;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.1);
+            cursor: move;
+        `;
+        mainContainer.appendChild(title);
+
+        statusMessageEl = createStatusPanel();
+        statusMessageEl.textContent = "Ready for Visa payment";
+        mainContainer.appendChild(statusMessageEl);
+
+        mainContainer.appendChild(createDateTimeInputs());
+
+        const slotsBtnContainer = document.createElement("div");
+        slotsBtnContainer.style.cssText = `
+            display: flex;
+            justify-content: center;
+            margin: 8px 0;
+        `;
+        slotsBtnContainer.appendChild(
+            createButton("Get Available Slots", getSlotTimes, "rgba(66,133,244,0.8)", "rgba(66,133,244,1)", "100%")
+        );
+        mainContainer.appendChild(slotsBtnContainer);
+
+        const recaptchaContainer = document.createElement("div");
+        recaptchaContainer.id = "ivac-recaptcha-container";
+        recaptchaContainer.style.cssText = `
+            margin: 10px 0;
+            min-height: 78px;
+            display: flex;
+            justify-content: center;
+        `;
+        mainContainer.appendChild(recaptchaContainer);
+
+        const actionButtons = document.createElement("div");
+        actionButtons.style.cssText = `
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        `;
+
+        actionButtons.appendChild(
+            createButton("Re-Cap", reloadCaptcha, "rgba(255,152,0,0.8)", "rgba(255,152,0,1)", "120px")
+        );
+
+        const payNowBtn = createButton("Pay Now", handlePayNow, "rgba(233,30,99,0.8)", "rgba(233,30,99,1)", "80px");
+        actionButtons.appendChild(payNowBtn);
+
+        actionButtons.appendChild(
+            createButton("Stop All", () => {
+                globalStop = true;
+                activeRequests.forEach(c => c.abort());
+                activeRequests = [];
+                logInfo("All operations stopped");
+                setTimeout(() => globalStop = false, 1000);
+            }, "rgba(234,67,53,0.8)", "rgba(234,67,53,1)", "80px")
+        );
+
+        mainContainer.appendChild(actionButtons);
+
+        mainContainer.style.opacity = "0";
+        mainContainer.style.transform = "translateY(-20px) scale(0.95)";
+        mainContainer.style.transition = "all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275)";
+
+        setTimeout(() => {
+            mainContainer.style.opacity = "1";
+            mainContainer.style.transform = "translateY(0) scale(1)";
+        }, 100);
+
+        document.body.appendChild(mainContainer);
+
+        makeDraggable(mainContainer, title);
+    }
+
+    // Initialize
+    window.addEventListener("load", async () => {
+        if (!document.querySelector('style[data-injected-font]')) {
+            const fontStyle = document.createElement('style');
+            fontStyle.setAttribute('data-injected-font', 'true');
+            fontStyle.textContent = `
+                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+            `;
+            document.head.appendChild(fontStyle);
+        }
+
+        // First try to get CSRF token from window.csrf_token
+        csrfToken = window.csrf_token || retrieveCsrfToken();
+
+        if (csrfToken) {
+            logInfo("System ready with CSRF token");
+        } else {
+            // Fallback to other methods if window.csrf_token not available
+            csrfToken = await fetchCsrfToken();
+            if (csrfToken) {
+                logInfo("System ready with CSRF token (fallback method)");
+            } else {
+                logError("Failed to get CSRF token - some features may not work");
+            }
+        }
+
+        createTopRightUI();
+    });
+})();
